@@ -1,31 +1,24 @@
 from ultralytics import YOLO
 import cv2
+import math
 
 model = YOLO("yolo11n.pt")
+
 video = cv2.VideoCapture("data/videos/traffic.mp4")
 
 if not video.isOpened():
     raise ValueError("Could not open video file.")
 
-# Store previous center_y for each track
 track_history = {}
 
-# Store IDs that have already been counted
-counted_ids = set()
+# ROI
+roi_x1 = 100
+roi_y1 = 250
+roi_x2 = 1800
+roi_y2 = 1800
 
-# Traffic statistics
-total_count = 0
-vehicle_counts = {
-    "car": 0,
-    "motorcycle": 0,
-    "bus": 0,
-    "truck": 0
-}
-
-direction_counts = {
-    "UP": 0,
-    "DOWN": 0
-}
+# Movement threshold in pixels
+MOVEMENT_THRESHOLD = 5
 
 while True:
     ret, frame = video.read()
@@ -43,127 +36,103 @@ while True:
     result = results[0]
     tracking_frame = result.plot()
 
-    height, width = frame.shape[:2]
-    line_y = int(height * 0.7)
-
-    # Draw counting line
-    cv2.line(
-        tracking_frame,
-        (0, line_y),
-        (width, line_y),
-        (0, 255, 0),
-        3
-    )
+    roi_count = 0
+    stopped_count = 0
 
     if result.boxes.id is not None:
 
         track_ids = result.boxes.id.int().cpu().tolist()
-        class_ids = result.boxes.cls.int().cpu().tolist()
         boxes = result.boxes.xyxy.int().cpu().tolist()
 
-        for track_id, class_id, box in zip(
-            track_ids,
-            class_ids,
-            boxes
-        ):
+        for track_id, box in zip(track_ids, boxes):
+
             x1, y1, x2, y2 = box
 
+            center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
 
-            class_name = result.names[class_id]
+            current_position = (center_x, center_y)
 
+            movement_status = "UNKNOWN"
+
+            # Calculate movement
             if track_id in track_history:
 
-                previous_y = track_history[track_id]
+                previous_x, previous_y = track_history[track_id]
 
-                direction = None
+                displacement = math.sqrt(
+                    (center_x - previous_x) ** 2
+                    + (center_y - previous_y) ** 2
+                )
 
-                # Above → Below
-                if previous_y < line_y <= center_y:
-                    direction = "DOWN"
+                if displacement < MOVEMENT_THRESHOLD:
+                    movement_status = "STOPPED"
+                else:
+                    movement_status = "MOVING"
 
-                # Below → Above
-                elif previous_y > line_y >= center_y:
-                    direction = "UP"
+            # Check whether vehicle is inside ROI
+            if (
+                roi_x1 <= center_x <= roi_x2
+                and roi_y1 <= center_y <= roi_y2
+            ):
+                roi_count += 1
 
-                # Count only once per object
-                if direction and track_id not in counted_ids:
+                if movement_status == "STOPPED":
+                    stopped_count += 1
 
-                    counted_ids.add(track_id)
+            # Update track history
+            track_history[track_id] = current_position
 
-                    total_count += 1
+    # Calculate stopped ratio
+    if roi_count > 0:
+        stopped_ratio = stopped_count / roi_count
+    else:
+        stopped_ratio = 0
 
-                    # Count vehicle type
-                    if class_name in vehicle_counts:
-                        vehicle_counts[class_name] += 1
+    # Determine congestion level
+    if stopped_ratio < 0.3:
+        congestion_level = "LOW"
 
-                    # Count direction
-                    direction_counts[direction] += 1
+    elif stopped_ratio < 0.6:
+        congestion_level = "MEDIUM"
 
-                    print(
-                        f"ID {track_id} | "
-                        f"{class_name} | "
-                        f"{direction}"
-                    )
+    else:
+        congestion_level = "HIGH"
 
-            # Update tracking history
-            track_history[track_id] = center_y
-
-    # Display analytics
-    cv2.putText(
+    # Draw ROI
+    cv2.rectangle(
         tracking_frame,
-        f"Total: {total_count}",
-        (50, 50),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.2,
+        (roi_x1, roi_y1),
+        (roi_x2, roi_y2),
         (0, 255, 0),
         3
     )
 
+    # Display analytics
     cv2.putText(
         tracking_frame,
-        f"Cars: {vehicle_counts['car']}",
+        f"Vehicles: {roi_count}",
+        (50, 50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2
+    )
+
+    cv2.putText(
+        tracking_frame,
+        f"Stopped: {stopped_count}",
         (50, 90),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
+        1,
         (0, 255, 0),
         2
     )
 
     cv2.putText(
         tracking_frame,
-        f"Motorcycles: {vehicle_counts['motorcycle']}",
-        (50, 125),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.putText(
-        tracking_frame,
-        f"Buses: {vehicle_counts['bus']}",
-        (50, 160),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.putText(
-        tracking_frame,
-        f"Trucks: {vehicle_counts['truck']}",
-        (50, 195),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.putText(
-        tracking_frame,
-        f"UP: {direction_counts['UP']}",
-        (width - 250, 50),
+        f"Stopped Ratio: {stopped_ratio:.2f}",
+        (50, 130),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,
         (0, 255, 0),
@@ -172,15 +141,15 @@ while True:
 
     cv2.putText(
         tracking_frame,
-        f"DOWN: {direction_counts['DOWN']}",
-        (width - 250, 90),
+        f"Congestion: {congestion_level}",
+        (50, 170),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,
         (0, 255, 0),
         2
     )
 
-    cv2.imshow("Traffic Analytics", tracking_frame)
+    cv2.imshow("Traffic Congestion", tracking_frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
